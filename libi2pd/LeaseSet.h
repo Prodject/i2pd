@@ -9,6 +9,7 @@
 #include "Identity.h"
 #include "Timestamp.h"
 #include "I2PEndian.h"
+#include "Blinding.h"
 
 namespace i2p
 {
@@ -78,9 +79,9 @@ namespace data
 			bool operator== (const LeaseSet& other) const
 			{ return m_BufferLen == other.m_BufferLen && !memcmp (m_Buffer, other.m_Buffer, m_BufferLen); };
 			virtual uint8_t GetStoreType () const { return NETDB_STORE_TYPE_LEASESET; };
-			virtual uint8_t GetOrigStoreType () const { return NETDB_STORE_TYPE_LEASESET; };
 			virtual uint32_t GetPublishedTimestamp () const { return 0; }; // should be set for LeaseSet2 only
 			virtual std::shared_ptr<const i2p::crypto::Verifier> GetTransientVerifier () const { return nullptr; };		  
+			virtual bool IsPublishedEncrypted () const { return false; };
 
 			// implements RoutingDestination
 			std::shared_ptr<const IdentityEx> GetIdentity () const { return m_Identity; };
@@ -128,56 +129,30 @@ namespace data
 	const uint8_t NETDB_STORE_TYPE_META_LEASESET2 = 7;
 
 	const uint16_t LEASESET2_FLAG_OFFLINE_KEYS = 0x0001;
+	const uint16_t LEASESET2_FLAG_UNPUBLISHED_LEASESET = 0x0002;	
+	const uint16_t LEASESET2_FLAG_PUBLISHED_ENCRYPTED = 0x0004;
 
-	class BlindedPublicKey // for encrypted LS2
-	{
-		public:
-
-			BlindedPublicKey (std::shared_ptr<const IdentityEx> identity, SigningKeyType blindedKeyType = i2p::data::SIGNING_KEY_TYPE_REDDSA_SHA512_ED25519);
-			BlindedPublicKey (const std::string& b33); // from b33 without .b32.i2p			
-			std::string ToB33 () const;
-
-			const uint8_t * GetPublicKey () const { return m_PublicKey.data (); };
-			size_t GetPublicKeyLen () const { return m_PublicKey.size (); };
-			SigningKeyType GetSigType () const  { return m_SigType; };
-			SigningKeyType GetBlindedSigType () const  { return m_BlindedSigType; };
-
-			void GetSubcredential (const uint8_t * blinded, size_t len, uint8_t * subcredential) const; // 32 bytes
-			void GetBlindedKey (const char * date, uint8_t * blindedKey) const; // blinded key 32 bytes, date is 8 chars "YYYYMMDD" 
-			void BlindPrivateKey (const uint8_t * priv, const char * date, uint8_t * blindedPriv, uint8_t * blindedPub) const; // blinded key 32 bytes, date is 8 chars "YYYYMMDD" 
-			i2p::data::IdentHash GetStoreHash (const char * date = nullptr) const; // date is 8 chars "YYYYMMDD", use current if null
-
-		private:
-
-			void GetCredential (uint8_t * credential) const; // 32 bytes
-			void GenerateAlpha (const char * date, uint8_t * seed) const; // 64 bytes, date is 8 chars "YYYYMMDD" 
-			void H (const std::string& p, const std::vector<std::pair<const uint8_t *, size_t> >& bufs, uint8_t * hash) const;
-
-		private:
-
-			std::vector<uint8_t> m_PublicKey;
-			i2p::data::SigningKeyType m_SigType, m_BlindedSigType;
-	};
-	
 	class LeaseSet2: public LeaseSet
 	{
 		public:
 
 			LeaseSet2 (uint8_t storeType, const uint8_t * buf, size_t len,  bool storeLeases = true);
-			LeaseSet2 (const uint8_t * buf, size_t len, std::shared_ptr<const BlindedPublicKey> key); // store type 5, called from local netdb only
+			LeaseSet2 (const uint8_t * buf, size_t len, std::shared_ptr<const BlindedPublicKey> key, const uint8_t * secret = nullptr); // store type 5, called from local netdb only
 			uint8_t GetStoreType () const { return m_StoreType; };
-			uint8_t GetOrigStoreType () const { return m_OrigStoreType; };
 			uint32_t GetPublishedTimestamp () const { return m_PublishedTimestamp; };
+			bool IsPublic () const { return m_IsPublic; };
+			bool IsPublishedEncrypted () const { return m_IsPublishedEncrypted; };
 			std::shared_ptr<const i2p::crypto::Verifier> GetTransientVerifier () const { return m_TransientVerifier; };
 			void Update (const uint8_t * buf, size_t len, bool verifySignature);
 
 			// implements RoutingDestination
 			void Encrypt (const uint8_t * data, uint8_t * encrypted, BN_CTX * ctx) const;
+			CryptoKeyType GetEncryptionType () const { return m_EncryptionType; };
 
 		private:
 
 			void ReadFromBuffer (const uint8_t * buf, size_t len, bool readIdentity = true, bool verifySignature = true);
-			void ReadFromBufferEncrypted (const uint8_t * buf, size_t len, std::shared_ptr<const BlindedPublicKey> key);
+			void ReadFromBufferEncrypted (const uint8_t * buf, size_t len, std::shared_ptr<const BlindedPublicKey> key, const uint8_t * secret);
 			size_t ReadStandardLS2TypeSpecificPart (const uint8_t * buf, size_t len);
 			size_t ReadMetaLS2TypeSpecificPart (const uint8_t * buf, size_t len);
 
@@ -185,12 +160,15 @@ namespace data
 			bool VerifySignature (Verifier& verifier, const uint8_t * buf, size_t len, size_t signatureOffset);
 
 			uint64_t ExtractTimestamp (const uint8_t * buf, size_t len) const;
+			size_t ExtractClientAuthData (const uint8_t * buf, size_t len, const uint8_t * secret, const uint8_t * subcredential, uint8_t * authCookie) const; // subcredential is subcredential + timestamp, return length of autData without flag
 
 		private:
 
-			uint8_t m_StoreType, m_OrigStoreType;  
+			uint8_t m_StoreType;  
 			uint32_t m_PublishedTimestamp = 0;
+			bool m_IsPublic = true, m_IsPublishedEncrypted = false;
 			std::shared_ptr<i2p::crypto::Verifier> m_TransientVerifier;
+			CryptoKeyType m_EncryptionType = CRYPTO_KEY_TYPE_ELGAMAL;
 			std::shared_ptr<i2p::crypto::CryptoKeyEncryptor> m_Encryptor; // for standardLS2
 	};
 
@@ -255,7 +233,8 @@ namespace data
 
 			LocalLeaseSet2 (uint8_t storeType, const i2p::data::PrivateKeys& keys, 
 				uint16_t keyType, uint16_t keyLen, const uint8_t * encryptionPublicKey, 
-				std::vector<std::shared_ptr<i2p::tunnel::InboundTunnel> > tunnels);
+				std::vector<std::shared_ptr<i2p::tunnel::InboundTunnel> > tunnels, 
+				bool isPublic, bool isPublishedEncrypted = false);
 			LocalLeaseSet2 (uint8_t storeType, std::shared_ptr<const IdentityEx> identity, const uint8_t * buf, size_t len);	// from I2CP
 		
 			virtual ~LocalLeaseSet2 () { delete[] m_Buffer; };
@@ -275,16 +254,27 @@ namespace data
 			size_t m_BufferLen;
 	};
 
+
+	const int ENCRYPTED_LEASESET_AUTH_TYPE_NONE = 0;
+	const int ENCRYPTED_LEASESET_AUTH_TYPE_DH = 1;
+	const int ENCRYPTED_LEASESET_AUTH_TYPE_PSK = 2;
+
+	typedef i2p::data::Tag<32> AuthPublicKey;	
+
 	class LocalEncryptedLeaseSet2: public LocalLeaseSet2
 	{
 		public:
 
-			LocalEncryptedLeaseSet2 (std::shared_ptr<const LocalLeaseSet2> ls, const i2p::data::PrivateKeys& keys, i2p::data::SigningKeyType blindedKeyType = i2p::data::SIGNING_KEY_TYPE_REDDSA_SHA512_ED25519); 
+			LocalEncryptedLeaseSet2 (std::shared_ptr<const LocalLeaseSet2> ls, const i2p::data::PrivateKeys& keys, int authType = ENCRYPTED_LEASESET_AUTH_TYPE_NONE, std::shared_ptr<std::vector<AuthPublicKey> > authKeys = nullptr); 
 
 			LocalEncryptedLeaseSet2 (std::shared_ptr<const IdentityEx> identity, const uint8_t * buf, size_t len); // from I2CP
 
 			const IdentHash& GetStoreHash () const { return m_StoreHash; };
 			std::shared_ptr<const LocalLeaseSet> GetInnerLeaseSet () const { return m_InnerLeaseSet; };
+
+		private:
+
+			void CreateClientAuthData (const uint8_t * subcredential, int authType, std::shared_ptr<std::vector<AuthPublicKey> > authKeys, const uint8_t * authCookie, uint8_t * authData) const;
 
 		private:
 

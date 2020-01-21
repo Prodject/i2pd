@@ -5,6 +5,7 @@
 #include <string>
 #include <memory>
 #include <mutex>
+#include <chrono>
 #include <boost/asio.hpp>
 #include "Identity.h"
 #include "RouterInfo.h"
@@ -64,8 +65,7 @@ namespace i2p
 			const uint8_t * GetNTCP2IV () const { return m_NTCP2Keys ? m_NTCP2Keys->iv : nullptr; };
 			i2p::crypto::X25519Keys& GetStaticKeys (); 
 
-			uint32_t GetUptime () const;
-			uint32_t GetStartupTime () const { return m_StartupTime; };
+			uint32_t GetUptime () const; // in seconds
 			uint64_t GetLastUpdateTime () const { return m_LastUpdateTime; };
 			uint64_t GetBandwidthLimit () const { return m_BandwidthLimit; };
 			uint64_t GetTransitBandwidthLimit () const { return (m_BandwidthLimit*m_ShareRatio)/100LL; };
@@ -79,7 +79,7 @@ namespace i2p
 
 			void UpdatePort (int port); // called from Daemon	
 			void UpdateAddress (const boost::asio::ip::address& host);	// called from SSU or Daemon
-			void PublishNTCP2Address (int port, bool publish = true);
+			void PublishNTCP2Address (int port, bool publish = true, bool v4only = false);
 			void UpdateNTCP2Address (bool enable);
 			void PublishNTCPAddress (bool publish, bool v4only = true);
 			bool AddIntroducer (const i2p::data::RouterInfo::Introducer& introducer);
@@ -101,8 +101,7 @@ namespace i2p
 			void SetSupportsV6 (bool supportsV6);
 			void SetSupportsV4 (bool supportsV4);
 
-			void UpdateNTCPV6Address (const boost::asio::ip::address& host); // called from NTCP session
-			void UpdateNTCP2V6Address (const boost::asio::ip::address& host); // called from NTCP2 session
+			void UpdateNTCP2V6Address (const boost::asio::ip::address& host); // called from Daemon. TODO: remove
 			void UpdateStats ();
 			void UpdateTimestamp (uint64_t ts); // in seconds, called from NetDb before publishing
 			void CleanupDestination ();	// garlic destination
@@ -116,11 +115,16 @@ namespace i2p
 			// implements GarlicDestination
 			std::shared_ptr<const i2p::data::LocalLeaseSet> GetLeaseSet () { return nullptr; };
 			std::shared_ptr<i2p::tunnel::TunnelPool> GetTunnelPool () const;
-			void HandleI2NPMessage (const uint8_t * buf, size_t len, std::shared_ptr<i2p::tunnel::InboundTunnel> from);
 
 			// override GarlicDestination
 			void ProcessGarlicMessage (std::shared_ptr<I2NPMessage> msg);
 			void ProcessDeliveryStatusMessage (std::shared_ptr<I2NPMessage> msg);
+
+		protected:
+
+			// implements GarlicDestination
+			void HandleI2NPMessage (const uint8_t * buf, size_t len);
+			bool HandleCloveI2NPMessage (I2NPMessageType typeID, const uint8_t * payload, size_t len) { return false; }; // not implemented	
 
 		private:
 
@@ -137,8 +141,8 @@ namespace i2p
 			i2p::data::PrivateKeys m_Keys;
 			std::shared_ptr<i2p::crypto::CryptoKeyDecryptor> m_Decryptor;
 			uint64_t m_LastUpdateTime; // in seconds
-			bool m_AcceptsTunnels, m_IsFloodfill;
-			uint64_t m_StartupTime; // in seconds since epoch
+			bool m_AcceptsTunnels, m_IsFloodfill;	
+			std::chrono::time_point<std::chrono::steady_clock> m_StartupTime;
 			uint64_t m_BandwidthLimit; // allowed bandwidth
 			int m_ShareRatio;
 			RouterStatus m_Status;

@@ -85,7 +85,7 @@ namespace transport
 		const uint8_t * GetRemotePub () const { return m_RemoteEphemeralPublicKey; }; // Y for Alice and X for Bob
 		uint8_t * GetRemotePub () { return m_RemoteEphemeralPublicKey; }; // to set
 
-		const uint8_t * GetK () const { return m_K; };
+		const uint8_t * GetK () const { return m_CK + 32; };
 		const uint8_t * GetCK () const { return m_CK; };
 		const uint8_t * GetH () const { return m_H; };
 
@@ -114,7 +114,7 @@ namespace transport
 
 		i2p::crypto::X25519Keys m_EphemeralKeys;
 		uint8_t m_RemoteEphemeralPublicKey[32]; // x25519
-		uint8_t m_RemoteStaticKey[32], m_IV[16], m_H[32] /*h*/, m_CK[33] /*ck*/, m_K[32] /*k*/;
+		uint8_t m_RemoteStaticKey[32], m_IV[16], m_H[32] /*h*/, m_CK[64] /* [ck, k]*/;
 		i2p::data::IdentHash m_RemoteIdentHash;
 		uint16_t m3p2Len; 
 
@@ -133,6 +133,7 @@ namespace transport
 			void Terminate ();
 			void TerminateByTimeout ();
 			void Done ();
+			void Close () { m_Socket.close (); }; // for accept
 
 			boost::asio::ip::tcp::socket& GetSocket () { return m_Socket; };
 
@@ -194,7 +195,7 @@ namespace transport
 
 			std::unique_ptr<NTCP2Establisher> m_Establisher;
 			// data phase
-			uint8_t m_Kab[33], m_Kba[32], m_Sipkeysab[33], m_Sipkeysba[32]; 
+			uint8_t m_Kab[32], m_Kba[32], m_Sipkeysab[32], m_Sipkeysba[32]; 
 			const uint8_t * m_SendKey, * m_ReceiveKey;
 #if OPENSSL_SIPHASH 
 			EVP_PKEY * m_SendSipKey, * m_ReceiveSipKey;
@@ -227,7 +228,7 @@ namespace transport
 			void Start ();
 			void Stop ();
 
-			bool AddNTCP2Session (std::shared_ptr<NTCP2Session> session);
+			bool AddNTCP2Session (std::shared_ptr<NTCP2Session> session, bool incoming = false);
 			void RemoveNTCP2Session (std::shared_ptr<NTCP2Session> session);
 			std::shared_ptr<NTCP2Session> FindNTCP2Session (const i2p::data::IdentHash& ident);
 

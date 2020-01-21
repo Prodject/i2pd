@@ -41,15 +41,8 @@ namespace transport
 
 	void NTCP2Establisher::MixKey (const uint8_t * inputKeyMaterial)
 	{
-		// temp_key = HMAC-SHA256(ck, input_key_material)
-		uint8_t tempKey[32]; unsigned int len;
-		HMAC(EVP_sha256(), m_CK, 32, inputKeyMaterial, 32, tempKey, &len); 	
-		// ck = HMAC-SHA256(temp_key, byte(0x01)) 
-		static uint8_t one[1] =  { 1 };
-		HMAC(EVP_sha256(), tempKey, 32, one, 1, m_CK, &len); 	
-		// derived = HMAC-SHA256(temp_key, ck || byte(0x02))
-		m_CK[32] = 2;
-		HMAC(EVP_sha256(), tempKey, 32, m_CK, 33, m_K, &len); 	
+		i2p::crypto::HKDF (m_CK, inputKeyMaterial, 32, "", m_CK);
+		// ck is m_CK[0:31], k is m_CK[32:63]
 	}
 
 	void NTCP2Establisher::MixHash (const uint8_t * buf, size_t len)
@@ -161,6 +154,7 @@ namespace transport
 		// fill options
 		uint8_t options[32]; // actual options size is 16 bytes
 		memset (options, 0, 16);
+		options[0] = i2p::context.GetNetID (); // network ID
 		options[1] = 2; // ver	
 		htobe16buf (options + 2, paddingLength); // padLen
 		// m3p2Len	
@@ -180,7 +174,7 @@ namespace transport
 		// sign and encrypt options, use m_H as AD			
 		uint8_t nonce[12];
 		memset (nonce, 0, 12); // set nonce to zero
-		i2p::crypto::AEADChaCha20Poly1305 (options, 16, m_H, 32, m_K, nonce, m_SessionRequestBuffer + 32, 32, true); // encrypt
+		i2p::crypto::AEADChaCha20Poly1305 (options, 16, GetH (), 32, GetK (), nonce, m_SessionRequestBuffer + 32, 32, true); // encrypt
 	}
 
 	void NTCP2Establisher::CreateSessionCreatedMessage ()
@@ -203,7 +197,7 @@ namespace transport
 		// sign and encrypt options, use m_H as AD			
 		uint8_t nonce[12];
 		memset (nonce, 0, 12); // set nonce to zero
-		i2p::crypto::AEADChaCha20Poly1305 (options, 16, m_H, 32, m_K, nonce, m_SessionCreatedBuffer + 32, 32, true); // encrypt
+		i2p::crypto::AEADChaCha20Poly1305 (options, 16, GetH (), 32, GetK (), nonce, m_SessionCreatedBuffer + 32, 32, true); // encrypt
 
 	}
 
@@ -216,7 +210,7 @@ namespace transport
 			MixHash (m_SessionCreatedBuffer + 64, paddingLength);	
 
 		// part1 48 bytes  
-		i2p::crypto::AEADChaCha20Poly1305 (i2p::context.GetNTCP2StaticPublicKey (), 32, m_H, 32, m_K, nonce, m_SessionConfirmedBuffer, 48, true); // encrypt
+		i2p::crypto::AEADChaCha20Poly1305 (i2p::context.GetNTCP2StaticPublicKey (), 32, GetH (), 32, GetK (), nonce, m_SessionConfirmedBuffer, 48, true); // encrypt
 	}
 
 	void NTCP2Establisher::CreateSessionConfirmedMessagePart2 (const uint8_t * nonce)
@@ -227,7 +221,7 @@ namespace transport
 		// encrypt m3p2, it must be filled in SessionRequest
 		KDF3Alice (); 
 		uint8_t * m3p2 = m_SessionConfirmedBuffer + 48;
-		i2p::crypto::AEADChaCha20Poly1305 (m3p2, m3p2Len - 16, m_H, 32, m_K, nonce, m3p2, m3p2Len, true); // encrypt 
+		i2p::crypto::AEADChaCha20Poly1305 (m3p2, m3p2Len - 16, GetH (), 32, GetK (), nonce, m3p2, m3p2Len, true); // encrypt 
 		// update h again
 		MixHash (m3p2, m3p2Len); //h = SHA256(h || ciphertext)
 	}	
@@ -245,9 +239,14 @@ namespace transport
 		// verify MAC and decrypt options block (32 bytes), use m_H as AD
 		uint8_t nonce[12], options[16];
 		memset (nonce, 0, 12); // set nonce to zero
-		if (i2p::crypto::AEADChaCha20Poly1305 (m_SessionRequestBuffer + 32, 16, m_H, 32, m_K, nonce, options, 16, false)) // decrypt
+		if (i2p::crypto::AEADChaCha20Poly1305 (m_SessionRequestBuffer + 32, 16, GetH (), 32, GetK (), nonce, options, 16, false)) // decrypt
 		{
 			// options
+			if (options[0] && options[0] != i2p::context.GetNetID ())
+			{
+				LogPrint (eLogWarning, "NTCP2: SessionRequest networkID ", (int)options[0], " mismatch. Expected ", i2p::context.GetNetID ());
+				return false;
+			}
 			if (options[1] == 2) // ver is always 2 
 			{
 				paddingLen = bufbe16toh (options + 2);
@@ -295,7 +294,7 @@ namespace transport
 		uint8_t payload[16];
 		uint8_t nonce[12];
 		memset (nonce, 0, 12); // set nonce to zero
-		if (i2p::crypto::AEADChaCha20Poly1305 (m_SessionCreatedBuffer + 32, 16, m_H, 32, m_K, nonce, payload, 16, false)) // decrypt
+		if (i2p::crypto::AEADChaCha20Poly1305 (m_SessionCreatedBuffer + 32, 16, GetH (), 32, GetK (), nonce, payload, 16, false)) // decrypt
 		{
 			// options		
 			paddingLen = bufbe16toh(payload + 2);
@@ -324,7 +323,7 @@ namespace transport
 		if (paddingLength > 0)
 			MixHash (m_SessionCreatedBuffer + 64, paddingLength);
 		
-		if (!i2p::crypto::AEADChaCha20Poly1305 (m_SessionConfirmedBuffer, 32, m_H, 32, m_K, nonce, m_RemoteStaticKey, 32, false)) // decrypt S
+		if (!i2p::crypto::AEADChaCha20Poly1305 (m_SessionConfirmedBuffer, 32, GetH (), 32, GetK (), nonce, m_RemoteStaticKey, 32, false)) // decrypt S
 		{
 			LogPrint (eLogWarning, "NTCP2: SessionConfirmed Part1 AEAD verification failed ");
 			return false;
@@ -338,7 +337,7 @@ namespace transport
 		MixHash (m_SessionConfirmedBuffer, 48);		
 
 		KDF3Bob (); 
-		if (i2p::crypto::AEADChaCha20Poly1305 (m_SessionConfirmedBuffer + 48, m3p2Len - 16, m_H, 32, m_K, nonce, m3p2Buf, m3p2Len - 16, false)) // decrypt
+		if (i2p::crypto::AEADChaCha20Poly1305 (m_SessionConfirmedBuffer + 48, m3p2Len - 16, GetH (), 32, GetK (), nonce, m3p2Buf, m3p2Len - 16, false)) // decrypt
 		{
 			// caclulate new h again for KDF data
 			memcpy (m_SessionConfirmedBuffer + 16, m_H, 32); // h || ciphertext
@@ -396,6 +395,10 @@ namespace transport
 		{
 			m_IsTerminated = true;
 			m_IsEstablished = false;
+			boost::system::error_code ec;
+			m_Socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+			if (ec)
+				LogPrint (eLogDebug, "NTCP2: Couldn't shutdown socket: ", ec.message ());
 			m_Socket.close ();
 			transports.PeerDisconnected (shared_from_this ());
 			m_Server.RemoveNTCP2Session (shared_from_this ());
@@ -431,23 +434,17 @@ namespace transport
 
 	void NTCP2Session::KeyDerivationFunctionDataPhase ()
 	{
-		uint8_t tempKey[32]; unsigned int len;
-		HMAC(EVP_sha256(), m_Establisher->GetCK (), 32, nullptr, 0, tempKey, &len); // temp_key = HMAC-SHA256(ck, zerolen)
-		static uint8_t one[1] =  { 1 };
-		HMAC(EVP_sha256(), tempKey, 32, one, 1, m_Kab, &len);  // k_ab = HMAC-SHA256(temp_key, byte(0x01)).
-		m_Kab[32] = 2;
-		HMAC(EVP_sha256(), tempKey, 32, m_Kab, 33, m_Kba, &len);  // k_ba = HMAC-SHA256(temp_key, k_ab || byte(0x02))
-		static uint8_t ask[4] = { 'a', 's', 'k', 1 }, master[32];
-		HMAC(EVP_sha256(), tempKey, 32, ask, 4, master, &len); // ask_master = HMAC-SHA256(temp_key, "ask" || byte(0x01))
+		uint8_t k[64];
+		i2p::crypto::HKDF (m_Establisher->GetCK (), nullptr, 0, "", k); // k_ab, k_ba = HKDF(ck, zerolen)
+		memcpy (m_Kab, k, 32); memcpy (m_Kba, k + 32, 32);
+		uint8_t master[32];
+		i2p::crypto::HKDF (m_Establisher->GetCK (), nullptr, 0, "ask", master, 32); // ask_master = HKDF(ck, zerolen, info="ask")
 		uint8_t h[39];
 		memcpy (h, m_Establisher->GetH (), 32);
 		memcpy (h + 32, "siphash", 7);
-		HMAC(EVP_sha256(), master, 32, h, 39, tempKey, &len); // temp_key = HMAC-SHA256(ask_master, h || "siphash")
-		HMAC(EVP_sha256(), tempKey, 32, one, 1, master, &len); // sip_master = HMAC-SHA256(temp_key, byte(0x01))  
-		HMAC(EVP_sha256(), master, 32, nullptr, 0, tempKey, &len); // temp_key = HMAC-SHA256(sip_master, zerolen)
-		HMAC(EVP_sha256(), tempKey, 32, one, 1, m_Sipkeysab, &len); // sipkeys_ab = HMAC-SHA256(temp_key, byte(0x01)).
-		m_Sipkeysab[32] = 2;
-		HMAC(EVP_sha256(), tempKey, 32, m_Sipkeysab, 33, m_Sipkeysba, &len); // sipkeys_ba = HMAC-SHA256(temp_key, sipkeys_ab || byte(0x02)) 
+		i2p::crypto::HKDF (master, h, 39, "", master, 32); // sip_master = HKDF(ask_master, h || "siphash")
+		i2p::crypto::HKDF (master, nullptr, 0, "", k); // sipkeys_ab, sipkeys_ba = HKDF(sip_master, zerolen)
+		memcpy (m_Sipkeysab, k, 32); memcpy (m_Sipkeysba, k + 32, 32);	
 	}
 
 
@@ -592,20 +589,29 @@ namespace transport
 
 	void NTCP2Session::HandleSessionConfirmedSent (const boost::system::error_code& ecode, std::size_t bytes_transferred)
 	{
-		LogPrint (eLogDebug, "NTCP2: SessionConfirmed sent");
-		KeyDerivationFunctionDataPhase ();
-		// Alice data phase keys
-		m_SendKey = m_Kab;
-		m_ReceiveKey = m_Kba; 
-		SetSipKeys (m_Sipkeysab, m_Sipkeysba);
-		memcpy (m_ReceiveIV.buf, m_Sipkeysba + 16, 8);
-		memcpy (m_SendIV.buf, m_Sipkeysab + 16, 8);
-		Established ();
-		ReceiveLength ();
+		(void) bytes_transferred;
+		if (ecode)
+		{
+			LogPrint (eLogWarning, "NTCP2: couldn't send SessionConfirmed message: ", ecode.message ());
+			Terminate ();
+		}
+		else
+		{	
+			LogPrint (eLogDebug, "NTCP2: SessionConfirmed sent");
+			KeyDerivationFunctionDataPhase ();
+			// Alice data phase keys
+			m_SendKey = m_Kab;
+			m_ReceiveKey = m_Kba; 
+			SetSipKeys (m_Sipkeysab, m_Sipkeysba);
+			memcpy (m_ReceiveIV.buf, m_Sipkeysba + 16, 8);
+			memcpy (m_SendIV.buf, m_Sipkeysab + 16, 8);
+			Established ();
+			ReceiveLength ();
 
-		// TODO: remove
-		// m_SendQueue.push_back (CreateDeliveryStatusMsg (1));
-		// SendQueue ();
+			// TODO: remove
+			// m_SendQueue.push_back (CreateDeliveryStatusMsg (1));
+			// SendQueue ();
+		}		
 	}
 
 	void NTCP2Session::HandleSessionCreatedSent (const boost::system::error_code& ecode, std::size_t bytes_transferred)
@@ -700,7 +706,7 @@ namespace transport
 					// ready to communicate	
 					auto existing = i2p::data::netdb.FindRouter (ri.GetRouterIdentity ()->GetIdentHash ()); // check if exists already
 					SetRemoteIdentity (existing ? existing->GetRouterIdentity () : ri.GetRouterIdentity ());
-					m_Server.AddNTCP2Session (shared_from_this ());
+					m_Server.AddNTCP2Session (shared_from_this (), true);
 					Established ();
 					ReceiveLength ();
 				}
@@ -1016,7 +1022,9 @@ namespace transport
 		
 		if (ecode)
 		{
-			LogPrint (eLogWarning, "NTCP2: Couldn't send frame ", ecode.message ());
+			if (ecode != boost::asio::error::operation_aborted)
+				LogPrint (eLogWarning, "NTCP2: Couldn't send frame ", ecode.message ());
+			Terminate ();
 		}	
 		else
 		{	
@@ -1239,9 +1247,12 @@ namespace transport
 		}
 	}
 
-	bool NTCP2Server::AddNTCP2Session (std::shared_ptr<NTCP2Session> session)
+	bool NTCP2Server::AddNTCP2Session (std::shared_ptr<NTCP2Session> session, bool incoming)
 	{
-		if (!session || !session->GetRemoteIdentity ()) return false;
+		if (!session) return false;
+		if (incoming)	
+			m_PendingIncomingSessions.remove (session);
+		if (!session->GetRemoteIdentity ()) return false;
 		auto& ident = session->GetRemoteIdentity ()->GetIdentHash ();
 		auto it = m_NTCP2Sessions.find (ident);
 		if (it != m_NTCP2Sessions.end ())
@@ -1304,8 +1315,6 @@ namespace transport
 		else
 		{
 			LogPrint (eLogDebug, "NTCP2: Connected to ", conn->GetSocket ().remote_endpoint ());
-			if (conn->GetSocket ().local_endpoint ().protocol () == boost::asio::ip::tcp::v6()) // ipv6
-				context.UpdateNTCP2V6Address (conn->GetSocket ().local_endpoint ().address ());
 			conn->ClientLogin ();
 		}
 	}
@@ -1323,15 +1332,21 @@ namespace transport
 				{
 					conn->ServerLogin ();
 					m_PendingIncomingSessions.push_back (conn);
+					conn = nullptr;
 				}
 			}
 			else
 				LogPrint (eLogError, "NTCP2: Connected from error ", ec.message ());
 		}
+		else
+			LogPrint (eLogError, "NTCP2: Accept error ", error.message ());
 
 		if (error != boost::asio::error::operation_aborted)
 		{
-			conn = std::make_shared<NTCP2Session> (*this);
+			if (!conn) // connection is used, create new one
+				conn = std::make_shared<NTCP2Session> (*this);
+			else // reuse failed
+				conn->Close ();
 			m_NTCP2Acceptor->async_accept(conn->GetSocket (), std::bind (&NTCP2Server::HandleAccept, this,
 				conn, std::placeholders::_1));
 		}
@@ -1387,13 +1402,13 @@ namespace transport
 			// pending
 			for (auto it = m_PendingIncomingSessions.begin (); it != m_PendingIncomingSessions.end ();)
 			{
-				if ((*it)->IsEstablished () || (*it)->IsTerminated ())
-					it = m_PendingIncomingSessions.erase (it); // established or terminated
-				else if ((*it)->IsTerminationTimeoutExpired (ts))
+				if ((*it)->IsEstablished () || (*it)->IsTerminationTimeoutExpired (ts))
 				{
 					(*it)->Terminate ();
-					it = m_PendingIncomingSessions.erase (it); // expired
+					it = m_PendingIncomingSessions.erase (it); // etsablished of expired
 				}
+				else if ((*it)->IsTerminated ())
+					it = m_PendingIncomingSessions.erase (it); // already terminated
 				else
 					it++;
 			}

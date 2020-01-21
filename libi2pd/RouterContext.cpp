@@ -19,7 +19,7 @@ namespace i2p
 
 	RouterContext::RouterContext ():
 		m_LastUpdateTime (0), m_AcceptsTunnels (true), m_IsFloodfill (false),
-		m_StartupTime (0), m_ShareRatio (100), m_Status (eRouterStatusOK),
+		m_ShareRatio (100), m_Status (eRouterStatusOK),
 		m_Error (eRouterErrorNone), m_NetID (I2PD_NET_ID)
 	{
 	}
@@ -27,7 +27,8 @@ namespace i2p
 	void RouterContext::Init ()
 	{
 		srand (i2p::util::GetMillisecondsSinceEpoch () % 1000);
-		m_StartupTime = i2p::util::GetSecondsSinceEpoch ();
+		m_StartupTime = std::chrono::steady_clock::now();
+
 		if (!Load ())
 			CreateNewRouter ();
 		m_Decryptor = m_Keys.CreateDecryptor (nullptr);
@@ -37,7 +38,7 @@ namespace i2p
 	void RouterContext::CreateNewRouter ()
 	{
 		m_Keys = i2p::data::PrivateKeys::CreateRandomKeys (i2p::data::SIGNING_KEY_TYPE_EDDSA_SHA512_ED25519);
-		SaveKeys ();			
+		SaveKeys ();
 		NewRouterInfo ();
 	}
 
@@ -50,14 +51,14 @@ namespace i2p
 		{
 			port = rand () % (30777 - 9111) + 9111; // I2P network ports range
 			if (port == 9150) port = 9151; // Tor browser
-		}	
-		bool ipv4; i2p::config::GetOption("ipv4", ipv4);
-		bool ipv6; i2p::config::GetOption("ipv6", ipv6);
-		bool ssu;    i2p::config::GetOption("ssu", ssu);
-		bool ntcp;   i2p::config::GetOption("ntcp", ntcp);
-		bool ntcp2;  i2p::config::GetOption("ntcp2.enabled", ntcp2);
-		bool nat;  i2p::config::GetOption("nat", nat);	
-		std::string ifname; i2p::config::GetOption("ifname", ifname);
+		}
+		bool ipv4;           i2p::config::GetOption("ipv4", ipv4);
+		bool ipv6;           i2p::config::GetOption("ipv6", ipv6);
+		bool ssu;            i2p::config::GetOption("ssu", ssu);
+		bool ntcp;           i2p::config::GetOption("ntcp", ntcp);
+		bool ntcp2;          i2p::config::GetOption("ntcp2.enabled", ntcp2);
+		bool nat;            i2p::config::GetOption("nat", nat);
+		std::string ifname;  i2p::config::GetOption("ifname", ifname);
 		std::string ifname4; i2p::config::GetOption("ifname4", ifname4);
 		std::string ifname6; i2p::config::GetOption("ifname6", ifname6);
 		if (ipv4)
@@ -79,7 +80,7 @@ namespace i2p
 		}
 		if (ipv6)
 		{
-			std::string host = "::";
+			std::string host = "::1";
 			if (!i2p::config::IsDefault("host") && !ipv4) // override if v6 only
 				i2p::config::GetOption("host", host);
 			else if (!ifname.empty())
@@ -103,17 +104,26 @@ namespace i2p
 		m_RouterInfo.Update (routerInfo.GetBuffer (), routerInfo.GetBufferLen ());
 
 		if (ntcp2) // we don't store iv in the address if non published so we must update it from keys
-		{ 
+		{
 			if (!m_NTCP2Keys) NewNTCP2Keys ();
-			UpdateNTCP2Address (true);	
+			UpdateNTCP2Address (true);
 			if (!ntcp) // NTCP2 should replace NTCP
 			{
 				bool published; i2p::config::GetOption("ntcp2.published", published);
 				if (published)
+				{
 					PublishNTCP2Address (port, true);
+					if (ipv6)
+					{
+						// add NTCP2 ipv6 address
+						std::string host = "::1";
+						if (!i2p::config::IsDefault ("ntcp2.addressv6"))
+							i2p::config::GetOption ("ntcp2.addressv6", host);
+						m_RouterInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv, boost::asio::ip::address_v6::from_string (host), port);
+					}
+				}
 			}
 		}
-
 	}
 
 	void RouterContext::UpdateRouterInfo ()
@@ -126,14 +136,14 @@ namespace i2p
 	void RouterContext::NewNTCP2Keys ()
 	{
 		m_StaticKeys.reset (new i2p::crypto::X25519Keys ());
-		m_StaticKeys->GenerateKeys ();			
+		m_StaticKeys->GenerateKeys ();
 		m_NTCP2Keys.reset (new NTCP2PrivateKeys ());
 		m_StaticKeys->GetPrivateKey (m_NTCP2Keys->staticPrivateKey);
 		memcpy (m_NTCP2Keys->staticPublicKey, m_StaticKeys->GetPublicKey (), 32);
 		RAND_bytes (m_NTCP2Keys->iv, 16);
 		// save
 		std::ofstream fk (i2p::fs::DataDirPath (NTCP2_KEYS), std::ofstream::binary | std::ofstream::out);
-		fk.write ((char *)m_NTCP2Keys.get (), sizeof (NTCP2PrivateKeys)); 
+		fk.write ((char *)m_NTCP2Keys.get (), sizeof (NTCP2PrivateKeys));
 	}
 
 	void RouterContext::SetStatus (RouterStatus status)
@@ -171,20 +181,21 @@ namespace i2p
 			UpdateRouterInfo ();
 	}
 
-	void RouterContext::PublishNTCP2Address (int port, bool publish)
+	void RouterContext::PublishNTCP2Address (int port, bool publish, bool v4only)
 	{
 		if (!m_NTCP2Keys) return;
-		if (!port)
-		{	
-			port = rand () % (30777 - 9111) + 9111; // I2P network ports range
-			if (port == 9150) port = 9151; // Tor browser
-		}
 		bool updated = false;
 		for (auto& address : m_RouterInfo.GetAddresses ())
 		{
-			if (address->IsNTCP2 () && (address->port != port || address->ntcp2->isPublished != publish))
+			if (address->IsNTCP2 () && (address->port != port || address->ntcp2->isPublished != publish) && (!v4only || address->host.is_v4 ()))
 			{
-				address->port = port;
+				if (!port && !address->port)
+				{
+					// select random port only if address's port is not set
+					port = rand () % (30777 - 9111) + 9111; // I2P network ports range
+					if (port == 9150) port = 9151; // Tor browser
+				}
+				if (port) address->port = port;
 				address->cost = publish ? 3 : 14;
 				address->ntcp2->isPublished = publish;
 				address->ntcp2->iv = m_NTCP2Keys->iv;
@@ -192,7 +203,7 @@ namespace i2p
 			}
 		}
 		if (updated)
-			UpdateRouterInfo ();	
+			UpdateRouterInfo ();
 	}
 
 	void RouterContext::UpdateNTCP2Address (bool enable)
@@ -205,7 +216,7 @@ namespace i2p
 			{
 				found = true;
 				if (!enable)
-				{ 
+				{
 					addresses.erase (it);
 					updated= true;
 				}
@@ -213,14 +224,14 @@ namespace i2p
 			}
 		}
 		if (enable && !found)
-		{	
-			m_RouterInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv);	
+		{
+			m_RouterInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv);
 			updated = true;
 		}
 		if (updated)
 			UpdateRouterInfo ();
 	}
-	
+
 	void RouterContext::UpdateAddress (const boost::asio::ip::address& host)
 	{
 		bool updated = false;
@@ -229,6 +240,20 @@ namespace i2p
 			if (address->host != host && address->IsCompatible (host))
 			{
 				address->host = host;
+				if (host.is_v6 () && address->transportStyle == i2p::data::RouterInfo::eTransportSSU)
+				{
+					// update MTU
+					auto mtu = i2p::util::net::GetMTU (host);
+					if (mtu)
+					{
+						LogPrint (eLogDebug, "Router: Our v6 MTU=", mtu);
+						if (mtu > 1472) { // TODO: magic constant
+							mtu = 1472;
+							LogPrint(eLogWarning, "Router: MTU dropped to upper limit of 1472 bytes");
+						}
+						if (address->ssu) address->ssu->mtu = mtu;
+					}
+				}
 				updated = true;
 			}
 		}
@@ -371,7 +396,7 @@ namespace i2p
 						break;
 					}
 				}
-			}	
+			}
 		}
 		else
 		{
@@ -386,9 +411,9 @@ namespace i2p
 				else
 					++it;
 			}
-		}	
-	}	
-		
+		}
+	}
+
 	void RouterContext::SetUnreachable ()
 	{
 		// set caps
@@ -398,13 +423,25 @@ namespace i2p
 		caps &= ~i2p::data::RouterInfo::eFloodfill;	// can't be floodfill
 		caps &= ~i2p::data::RouterInfo::eSSUIntroducer; // can't be introducer
 		m_RouterInfo.SetCaps (caps);
-		// remove NTCP v4 address
-		PublishNTCPAddress (false);
+		uint16_t port = 0;
 		// delete previous introducers
 		auto& addresses = m_RouterInfo.GetAddresses ();
 		for (auto& addr : addresses)
 			if (addr->ssu)
+			{
 				addr->ssu->introducers.clear ();
+				port = addr->port;
+			}
+		// remove NTCP or NTCP2 v4 address
+		bool ntcp;   i2p::config::GetOption("ntcp", ntcp);
+		if (ntcp)
+			PublishNTCPAddress (false);
+		else
+		{
+			bool ntcp2; i2p::config::GetOption("ntcp2.enabled", ntcp2);
+			if (ntcp2)
+				PublishNTCP2Address (port, false, true);
+		}
 		// update
 		UpdateRouterInfo ();
 	}
@@ -419,15 +456,34 @@ namespace i2p
 		if (m_IsFloodfill)
 			caps |= i2p::data::RouterInfo::eFloodfill;
 		m_RouterInfo.SetCaps (caps);
-		// insert NTCP back
-		bool ntcp;   i2p::config::GetOption("ntcp", ntcp);
-		if (ntcp) 
-			PublishNTCPAddress (true);
+		uint16_t port = 0;
 		// delete previous introducers
 		auto& addresses = m_RouterInfo.GetAddresses ();
 		for (auto& addr : addresses)
 			if (addr->ssu)
+			{
 				addr->ssu->introducers.clear ();
+				port = addr->port;
+			}
+		// insert NTCP or NTCP2 back
+		bool ntcp;   i2p::config::GetOption("ntcp", ntcp);
+		if (ntcp)
+			PublishNTCPAddress (true);
+		else
+		{
+			// ntcp2
+			bool ntcp2; i2p::config::GetOption("ntcp2.enabled", ntcp2);
+			if (ntcp2)
+			{
+				bool published; i2p::config::GetOption ("ntcp2.published", published);
+				if (published)
+				{
+					uint16_t ntcp2Port; i2p::config::GetOption ("ntcp2.port", ntcp2Port);
+					if (!ntcp2Port) ntcp2Port = port;
+					PublishNTCP2Address (ntcp2Port, true, true);
+				}
+			}
+		}
 		// update
 		UpdateRouterInfo ();
 	}
@@ -435,7 +491,66 @@ namespace i2p
 	void RouterContext::SetSupportsV6 (bool supportsV6)
 	{
 		if (supportsV6)
+		{
 			m_RouterInfo.EnableV6 ();
+			// insert v6 addresses if necessary
+			bool foundSSU = false, foundNTCP = false, foundNTCP2 = false;
+			uint16_t port = 0;
+			auto& addresses = m_RouterInfo.GetAddresses ();
+			for (auto& addr: addresses)
+			{
+				if (addr->host.is_v6 ())
+				{
+					if (addr->transportStyle == i2p::data::RouterInfo::eTransportSSU)
+						foundSSU = true;
+					else if (addr->IsNTCP2 ())
+					{
+						if (addr->IsPublishedNTCP2 ()) foundNTCP2 = true;
+					}
+					else
+						foundNTCP = true;
+				}
+				port = addr->port;
+			}
+			if (!port) i2p::config::GetOption("port", port);
+			// SSU
+			if (!foundSSU)
+			{
+				bool ssu; i2p::config::GetOption("ssu", ssu);
+				if (ssu)
+				{
+					std::string host = "::1"; // TODO: read host
+					m_RouterInfo.AddSSUAddress (host.c_str (), port, GetIdentHash ());
+				}
+			}
+			// NTCP2
+			if (!foundNTCP2)
+			{
+				bool ntcp2; i2p::config::GetOption("ntcp2.enabled", ntcp2);
+				bool ntcp2Published; i2p::config::GetOption("ntcp2.published", ntcp2Published);
+				if (ntcp2 && ntcp2Published)
+				{
+					std::string ntcp2Host;
+					if (!i2p::config::IsDefault ("ntcp2.addressv6"))
+						i2p::config::GetOption ("ntcp2.addressv6", ntcp2Host);
+					else
+						ntcp2Host = "::1";
+					uint16_t ntcp2Port; i2p::config::GetOption ("ntcp2.port", ntcp2Port);
+					if (!ntcp2Port) ntcp2Port = port;
+					m_RouterInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv, boost::asio::ip::address::from_string (ntcp2Host), ntcp2Port);
+				}
+			}
+			// NTCP
+			if (!foundNTCP)
+			{
+				bool ntcp; i2p::config::GetOption("ntcp", ntcp);
+				if (ntcp)
+				{
+					std::string host = "::1";
+					m_RouterInfo.AddNTCPAddress (host.c_str (), port);
+				}
+			}
+		}
 		else
 			m_RouterInfo.DisableV6 ();
 		UpdateRouterInfo ();
@@ -450,50 +565,9 @@ namespace i2p
 		UpdateRouterInfo ();
 	}
 
-
-	void RouterContext::UpdateNTCPV6Address (const boost::asio::ip::address& host)
-	{
-		bool updated = false, found = false;
-		int port = 0;
-		auto& addresses = m_RouterInfo.GetAddresses ();
-		for (auto& addr: addresses)
-		{
-			if (addr->host.is_v6 () && addr->transportStyle == i2p::data::RouterInfo::eTransportNTCP)
-			{
-				if (addr->host != host)
-				{
-					addr->host = host;
-					updated = true;
-				}
-				found = true;
-			}
-			else
-				port = addr->port;
-		}
-		if (!found)
-		{
-			// create new address
-			m_RouterInfo.AddNTCPAddress (host.to_string ().c_str (), port);
-			auto mtu = i2p::util::net::GetMTU (host);
-			if (mtu)
-			{
-				LogPrint (eLogDebug, "Router: Our v6 MTU=", mtu);
-				if (mtu > 1472) { // TODO: magic constant
-					mtu = 1472;
-					LogPrint(eLogWarning, "Router: MTU dropped to upper limit of 1472 bytes");
-				}
-			}
-			m_RouterInfo.AddSSUAddress (host.to_string ().c_str (), port, GetIdentHash (), mtu ? mtu : 1472); // TODO
-			updated = true;
-		}
-		if (updated)
-			UpdateRouterInfo ();
-	}
-
 	void RouterContext::UpdateNTCP2V6Address (const boost::asio::ip::address& host)
 	{
-		bool updated = false, found = false;
-		int port = 0;
+		bool updated = false;
 		auto& addresses = m_RouterInfo.GetAddresses ();
 		for (auto& addr: addresses)
 		{
@@ -506,21 +580,13 @@ namespace i2p
 						addr->host = host;
 						updated = true;
 					}
-					found = true;
 					break;
 				}
-				else
-					port = addr->port; // NTCP2 v4
 			}
 		}
 
-		if (!found && port) // we have found NTCP2 v4 but not v6
-		{
-			m_RouterInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv, host, port);	
-			updated = true;
-		}
 		if (updated)
-			UpdateRouterInfo ();	
+			UpdateRouterInfo ();
 	}
 
 	void RouterContext::UpdateStats ()
@@ -563,7 +629,7 @@ namespace i2p
 		}
 		// read NTCP2 keys if available
 		std::ifstream n2k (i2p::fs::DataDirPath (NTCP2_KEYS), std::ifstream::in | std::ifstream::binary);
-		if (n2k) 
+		if (n2k)
 		{
 			n2k.seekg (0, std::ios::end);
 			len = n2k.tellg();
@@ -571,8 +637,8 @@ namespace i2p
 			if (len == sizeof (NTCP2PrivateKeys))
 			{
 				m_NTCP2Keys.reset (new NTCP2PrivateKeys ());
-				n2k.read ((char *)m_NTCP2Keys.get (), sizeof (NTCP2PrivateKeys));				
-			}	
+				n2k.read ((char *)m_NTCP2Keys.get (), sizeof (NTCP2PrivateKeys));
+			}
 			n2k.close ();
 		}
 		// read RouterInfo
@@ -626,9 +692,9 @@ namespace i2p
 		return i2p::tunnel::tunnels.GetExploratoryPool ();
 	}
 
-	void RouterContext::HandleI2NPMessage (const uint8_t * buf, size_t len, std::shared_ptr<i2p::tunnel::InboundTunnel> from)
+	void RouterContext::HandleI2NPMessage (const uint8_t * buf, size_t len)
 	{
-		i2p::HandleI2NPMessage (CreateI2NPMessage (buf, GetI2NPMessageLength (buf, len), from));
+		i2p::HandleI2NPMessage (CreateI2NPMessage (buf, GetI2NPMessageLength (buf, len)));
 	}
 
 	void RouterContext::ProcessGarlicMessage (std::shared_ptr<I2NPMessage> msg)
@@ -651,7 +717,7 @@ namespace i2p
 
 	uint32_t RouterContext::GetUptime () const
 	{
-		return i2p::util::GetSecondsSinceEpoch () - m_StartupTime;
+		return std::chrono::duration_cast<std::chrono::seconds> (std::chrono::steady_clock::now() - m_StartupTime).count ();
 	}
 
 	bool RouterContext::Decrypt (const uint8_t * encrypted, uint8_t * data, BN_CTX * ctx) const
@@ -667,7 +733,7 @@ namespace i2p
 	i2p::crypto::X25519Keys& RouterContext::GetStaticKeys ()
 	{
 		if (!m_StaticKeys)
-		{	
+		{
 			if (!m_NTCP2Keys) NewNTCP2Keys ();
 			auto x = new i2p::crypto::X25519Keys (m_NTCP2Keys->staticPrivateKey, m_NTCP2Keys->staticPublicKey);
 			if (!m_StaticKeys)
@@ -675,6 +741,6 @@ namespace i2p
 			else
 				delete x;
 		}
-		return *m_StaticKeys;		
-	}	
+		return *m_StaticKeys;
+	}
 }

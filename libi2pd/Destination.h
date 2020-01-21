@@ -55,7 +55,11 @@ namespace client
 	const char I2CP_PARAM_LEASESET_TYPE[] = "i2cp.leaseSetType";
 	const int DEFAULT_LEASESET_TYPE = 1;		
 	const char I2CP_PARAM_LEASESET_ENCRYPTION_TYPE[] = "i2cp.leaseSetEncType";
-
+	const char I2CP_PARAM_LEASESET_PRIV_KEY[] = "i2cp.leaseSetPrivKey"; // PSK decryption key, base64
+	const char I2CP_PARAM_LEASESET_AUTH_TYPE[] = "i2cp.leaseSetAuthType";
+	const char I2CP_PARAM_LEASESET_CLIENT_DH[] = "i2cp.leaseSetClient.dh"; // group of i2cp.leaseSetClient.dh.nnn
+	const char I2CP_PARAM_LEASESET_CLIENT_PSK[] = "i2cp.leaseSetClient.psk"; // group of i2cp.leaseSetClient.psk.nnn
+	
 	// latency
 	const char I2CP_PARAM_MIN_TUNNEL_LATENCY[] = "latency.min";
 	const int DEFAULT_MIN_TUNNEL_LATENCY = 0;
@@ -117,7 +121,6 @@ namespace client
 			// implements GarlicDestination
 			std::shared_ptr<const i2p::data::LocalLeaseSet> GetLeaseSet ();
 			std::shared_ptr<i2p::tunnel::TunnelPool> GetTunnelPool () const { return m_Pool; }
-			void HandleI2NPMessage (const uint8_t * buf, size_t len, std::shared_ptr<i2p::tunnel::InboundTunnel> from);
 
 			// override GarlicDestination
 			bool SubmitSessionKey (const uint8_t * key, const uint8_t * tag);
@@ -127,9 +130,15 @@ namespace client
 
 		protected:
 
+			// implements GarlicDestination
+			void HandleI2NPMessage (const uint8_t * buf, size_t len);
+			bool HandleCloveI2NPMessage (I2NPMessageType typeID, const uint8_t * payload, size_t len);
+
 			void SetLeaseSet (std::shared_ptr<const i2p::data::LocalLeaseSet> newLeaseSet);
 			int GetLeaseSetType () const { return m_LeaseSetType; };
 			void SetLeaseSetType (int leaseSetType) { m_LeaseSetType = leaseSetType; };
+			int GetAuthType () const { return m_AuthType; };
+			bool IsPublic () const { return m_IsPublic; };
 			virtual void CleanupDestination () {}; // additional clean up in derived classes
 			// I2CP
 			virtual void HandleDataMessage (const uint8_t * buf, size_t len) = 0;
@@ -146,7 +155,7 @@ namespace client
 			void HandlePublishDelayTimer (const boost::system::error_code& ecode);
 			void HandleDatabaseStoreMessage (const uint8_t * buf, size_t len);
 			void HandleDatabaseSearchReplyMessage (const uint8_t * buf, size_t len);
-			void HandleDeliveryStatusMessage (std::shared_ptr<I2NPMessage> msg);
+			void HandleDeliveryStatusMessage (uint32_t msgID);
 
 			void RequestLeaseSet (const i2p::data::IdentHash& dest, RequestComplete requestComplete, std::shared_ptr<const i2p::data::BlindedPublicKey> requestedBlindedKey = nullptr);
 			bool SendLeaseSetRequest (const i2p::data::IdentHash& dest, std::shared_ptr<const i2p::data::RouterInfo>  nextFloodfill, std::shared_ptr<LeaseSetRequest> request);
@@ -174,13 +183,16 @@ namespace client
 			boost::asio::deadline_timer m_PublishConfirmationTimer, m_PublishVerificationTimer,
 				m_PublishDelayTimer, m_CleanupTimer;
 			std::string m_Nickname;
-			int m_LeaseSetType;
+			int m_LeaseSetType, m_AuthType;
+			std::unique_ptr<i2p::data::Tag<32> > m_LeaseSetPrivKey; // non-null if presented
 
 		public:
 
 			// for HTTP only
 			int GetNumRemoteLeaseSets () const { return m_RemoteLeaseSets.size (); };
 			const decltype(m_RemoteLeaseSets)& GetLeaseSets () const { return m_RemoteLeaseSets; };
+			bool IsEncryptedLeaseSet () const { return m_LeaseSetType == i2p::data::NETDB_STORE_TYPE_ENCRYPTED_LEASESET2; };
+			bool IsPerClientAuth () const { return m_AuthType > 0; };
 	};
 
 	class ClientDestination: public LeaseSetDestination
@@ -228,6 +240,8 @@ namespace client
 			// implements LocalDestination
 			bool Decrypt (const uint8_t * encrypted, uint8_t * data, BN_CTX * ctx) const;
 			std::shared_ptr<const i2p::data::IdentityEx> GetIdentity () const { return m_Keys.GetPublic (); };
+			i2p::data::CryptoKeyType GetEncryptionType () const { return m_EncryptionKeyType; };
+			const uint8_t * GetEncryptionPublicKey () const { return m_EncryptionPublicKey; };
 
 		protected:
 
@@ -245,6 +259,9 @@ namespace client
 			void ScheduleCheckForReady(ReadyPromise * p);
 			void HandleCheckForReady(const boost::system::error_code & ecode, ReadyPromise * p);
 #endif
+
+			void ReadAuthKey (const std::string& group, const std::map<std::string, std::string> * params);
+
 		private:
 
 			i2p::data::PrivateKeys m_Keys;
@@ -259,6 +276,8 @@ namespace client
 			int m_RefCounter; // how many clients(tunnels) use this destination
 
 			boost::asio::deadline_timer m_ReadyChecker;
+
+			std::shared_ptr<std::vector<i2p::data::AuthPublicKey> > m_AuthKeys; // we don't need them for I2CP  
 
 		public:
 

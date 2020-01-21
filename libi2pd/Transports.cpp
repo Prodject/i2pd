@@ -465,6 +465,7 @@ namespace transport
 				}
 			}
 			LogPrint (eLogInfo, "Transports: No NTCP or SSU addresses available");
+			i2p::data::netdb.SetUnreachable (ident, true); // we are here because all connection attempts failed
 			peer.Done ();
 			std::unique_lock<std::mutex> l(m_PeersMutex);
 			m_Peers.erase (ident);
@@ -503,28 +504,6 @@ namespace transport
 			}
 		}
 	}
-	
-	void Transports::CloseSession (std::shared_ptr<const i2p::data::RouterInfo> router)
-	{
-		if (!router) return;
-		m_Service->post (std::bind (&Transports::PostCloseSession, this, router));
-	}
-
-	void Transports::PostCloseSession (std::shared_ptr<const i2p::data::RouterInfo> router)
-	{
-		auto ssuSession = m_SSUServer ? m_SSUServer->FindSession (router) : nullptr;
-		if (ssuSession) // try SSU first
-		{
-			m_SSUServer->DeleteSession (ssuSession);
-			LogPrint (eLogDebug, "Transports: SSU session closed");
-		}
-		auto ntcpSession = m_NTCPServer ? m_NTCPServer->FindNTCPSession(router->GetIdentHash()) : nullptr;
-		if (ntcpSession) // try deleting ntcp session too
-		{
-			ntcpSession->Terminate ();
-			LogPrint(eLogDebug, "Transports: NTCP session closed");
-		}
-	}
 
 	void Transports::DetectExternalIP ()
 	{
@@ -550,6 +529,23 @@ namespace transport
 					router = i2p::data::netdb.GetRandomRouter ();
 					if (router && router->IsSSU ())
 						m_SSUServer->CreateSession (router);		// no peer test
+				}
+			}
+			if (i2p::context.SupportsV6 ())
+			{
+				// try to connect to few v6 addresses to get our address back
+				for (int i = 0; i < 3; i++)
+				{
+					auto router = i2p::data::netdb.GetRandomSSUV6Router ();
+					if (router)
+					{
+						auto addr = router->GetSSUV6Address ();
+						if (addr)
+							m_SSUServer->GetServiceV6 ().post ([this, router, addr]
+							{
+								m_SSUServer->CreateDirectSession (router, { addr->host, (uint16_t)addr->port }, false);				
+							});
+					}
 				}
 			}
 		}
@@ -652,11 +648,16 @@ namespace transport
 			auto it = m_Peers.find (ident);
 			if (it != m_Peers.end ())
 			{
+				auto before = it->second.sessions.size ();
 				it->second.sessions.remove (session);
-				if (it->second.sessions.empty ()) // TODO: why?
+				if (it->second.sessions.empty ()) 
 				{
 					if (it->second.delayedMessages.size () > 0)
+					{
+						if (before > 0) // we had an active session before
+							it->second.numAttempts = 0; // start over
 						ConnectToPeer (ident, it->second);
+					}	
 					else
 					{
 						std::unique_lock<std::mutex> l(m_PeersMutex);

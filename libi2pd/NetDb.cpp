@@ -307,10 +307,18 @@ namespace data
 			if (it == m_LeaseSets.end () || it->second->GetStoreType () != storeType ||
 				leaseSet->GetPublishedTimestamp () > it->second->GetPublishedTimestamp ())
 			{
-				// TODO: implement actual update
-				LogPrint (eLogInfo, "NetDb: LeaseSet2 updated: ", ident.ToBase32());
-				m_LeaseSets[ident] = leaseSet;
-				return true;
+				if (leaseSet->IsPublic ())
+				{
+					// TODO: implement actual update
+					LogPrint (eLogInfo, "NetDb: LeaseSet2 updated: ", ident.ToBase32());
+					m_LeaseSets[ident] = leaseSet;
+					return true;
+				}
+				else
+				{
+					LogPrint (eLogWarning, "NetDb: Unpublished LeaseSet2 received: ", ident.ToBase32());
+					m_LeaseSets.erase (ident);
+				}
 			}
 		}
 		else
@@ -523,9 +531,10 @@ namespace data
 		auto total = m_RouterInfos.size ();
 		uint64_t expirationTimeout = NETDB_MAX_EXPIRATION_TIMEOUT*1000LL;
 		uint64_t ts = i2p::util::GetMillisecondsSinceEpoch();
+		auto uptime = i2p::context.GetUptime ();	
 		// routers don't expire if less than 90 or uptime is less than 1 hour
-		bool checkForExpiration = total > NETDB_MIN_ROUTERS && ts > (i2p::context.GetStartupTime () + 600)*1000LL; // 10 minutes
-		if (checkForExpiration && ts > (i2p::context.GetStartupTime () + 3600)*1000LL) // 1 hour
+		bool checkForExpiration = total > NETDB_MIN_ROUTERS && uptime > 600; // 10 minutes
+		if (checkForExpiration && uptime > 3600) // 1 hour
 			expirationTimeout = i2p::context.IsFloodfill () ? NETDB_FLOODFILL_EXPIRATION_TIMEOUT*1000LL :
 					NETDB_MIN_EXPIRATION_TIMEOUT*1000LL + (NETDB_MAX_EXPIRATION_TIMEOUT - NETDB_MIN_EXPIRATION_TIMEOUT)*1000LL*NETDB_MIN_ROUTERS/total;
 
@@ -698,14 +707,14 @@ namespace data
 			LogPrint (eLogDebug, "NetDb: store request: RouterInfo");
 			size_t size = bufbe16toh (buf + offset);
 			offset += 2;
-			if (size > 2048 || size > len - offset)
+			if (size > MAX_RI_BUFFER_SIZE || size > len - offset)
 			{
 				LogPrint (eLogError, "NetDb: invalid RouterInfo length ", (int)size);
 				return;
 			}
-			uint8_t uncompressed[2048];
-			size_t uncompressedSize = m_Inflator.Inflate (buf + offset, size, uncompressed, 2048);
-			if (uncompressedSize && uncompressedSize < 2048)
+			uint8_t uncompressed[MAX_RI_BUFFER_SIZE];
+			size_t uncompressedSize = m_Inflator.Inflate (buf + offset, size, uncompressed, MAX_RI_BUFFER_SIZE);
+			if (uncompressedSize && uncompressedSize < MAX_RI_BUFFER_SIZE)
 				updated = AddRouterInfo (ident, uncompressed, uncompressedSize);
 			else
 			{
@@ -909,7 +918,7 @@ namespace data
 				else if (!leaseSet->IsExpired ()) // we don't send back our LeaseSets
 				{
 					LogPrint (eLogDebug, "NetDb: requested LeaseSet ", key, " found");
-					replyMsg = CreateDatabaseStoreMsg (leaseSet);
+					replyMsg = CreateDatabaseStoreMsg (ident, leaseSet);
 				}
 			}
 
@@ -941,7 +950,7 @@ namespace data
 					if (numTags)
 					{
 						const i2p::garlic::SessionTag sessionTag(excluded + 33); // take first tag
-						i2p::garlic::GarlicRoutingSession garlic (sessionKey, sessionTag);
+						i2p::garlic::ElGamalAESSession garlic (sessionKey, sessionTag);
 						replyMsg = garlic.WrapSingleMessage (replyMsg);
 						if(replyMsg == nullptr) LogPrint(eLogError, "NetDb: failed to wrap message");
 					}
@@ -1075,6 +1084,15 @@ namespace data
 				return !router->IsHidden () && router->IsPeerTesting () && router->IsSSU (v4only);
 			});
 	}
+
+	std::shared_ptr<const RouterInfo> NetDb::GetRandomSSUV6Router () const
+	{
+		return GetRandomRouter (
+			[](std::shared_ptr<const RouterInfo> router)->bool
+			{
+				return !router->IsHidden () && router->IsSSUV6 ();
+			});
+	}		
 
 	std::shared_ptr<const RouterInfo> NetDb::GetRandomIntroducer () const
 	{

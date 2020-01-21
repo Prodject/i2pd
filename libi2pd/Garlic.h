@@ -85,8 +85,10 @@ namespace garlic
 	};
 
 	class GarlicDestination;
-	class GarlicRoutingSession: public std::enable_shared_from_this<GarlicRoutingSession>
+	class GarlicRoutingSession
 	{
+        protected:
+    
 			enum LeaseSetUpdateStatus
 			{
 				eLeaseSetUpToDate = 0,
@@ -95,26 +97,13 @@ namespace garlic
 				eLeaseSetDoNotSend
 			};
 
-			struct UnconfirmedTags
-			{
-				UnconfirmedTags (int n): numTags (n), tagsCreationTime (0) { sessionTags = new SessionTag[numTags]; };
-				~UnconfirmedTags () { delete[] sessionTags; };
-				uint32_t msgID;
-				int numTags;
-				SessionTag * sessionTags;
-				uint32_t tagsCreationTime;
-			};
-
 		public:
 
-			GarlicRoutingSession (GarlicDestination * owner, std::shared_ptr<const i2p::data::RoutingDestination> destination,
-				int numTags, bool attachLeaseSet);
-			GarlicRoutingSession (const uint8_t * sessionKey, const SessionTag& sessionTag); // one time encryption
-			~GarlicRoutingSession ();
-			std::shared_ptr<I2NPMessage> WrapSingleMessage (std::shared_ptr<const I2NPMessage> msg);
-			void MessageConfirmed (uint32_t msgID);
-			bool CleanupExpiredTags (); // returns true if something left
-			bool CleanupUnconfirmedTags (); // returns true if something has been deleted
+			GarlicRoutingSession (GarlicDestination * owner, bool attachLeaseSet);
+			GarlicRoutingSession ();
+			virtual ~GarlicRoutingSession ();
+			virtual std::shared_ptr<I2NPMessage> WrapSingleMessage (std::shared_ptr<const I2NPMessage> msg) = 0;
+            virtual bool CleanupUnconfirmedTags () { return false; }; // for I2CP, override in ElGamalAESSession
 
 			void SetLeaseSetUpdated ()
 			{
@@ -127,10 +116,60 @@ namespace garlic
 			std::shared_ptr<GarlicRoutingPath> GetSharedRoutingPath ();
 			void SetSharedRoutingPath (std::shared_ptr<GarlicRoutingPath> path);
 
-			const GarlicDestination * GetOwner () const { return m_Owner; }
+			GarlicDestination * GetOwner () const { return m_Owner; }
 			void SetOwner (GarlicDestination * owner) { m_Owner = owner; }
 
+        protected:
+    
+            LeaseSetUpdateStatus GetLeaseSetUpdateStatus () const { return m_LeaseSetUpdateStatus; }
+            void SetLeaseSetUpdateStatus (LeaseSetUpdateStatus status) { m_LeaseSetUpdateStatus = status; }
+            uint32_t GetLeaseSetUpdateMsgID () const { return m_LeaseSetUpdateMsgID; }
+            void SetLeaseSetUpdateMsgID (uint32_t msgID) { m_LeaseSetUpdateMsgID = msgID; }
+            void SetLeaseSetSubmissionTime (uint64_t ts) { m_LeaseSetSubmissionTime = ts; }    
+
 		private:
+
+			GarlicDestination * m_Owner;
+
+			LeaseSetUpdateStatus m_LeaseSetUpdateStatus;
+			uint32_t m_LeaseSetUpdateMsgID;
+			uint64_t m_LeaseSetSubmissionTime; // in milliseconds
+
+			std::shared_ptr<GarlicRoutingPath> m_SharedRoutingPath;
+
+		public:
+			// for HTTP only
+			virtual size_t GetNumOutgoingTags () const { return 0; };
+	};
+    //using GarlicRoutingSessionPtr = std::shared_ptr<GarlicRoutingSession>;
+	typedef std::shared_ptr<GarlicRoutingSession> GarlicRoutingSessionPtr; // TODO: replace to using after switch to 4.8    
+
+    class ElGamalAESSession: public GarlicRoutingSession,  public std::enable_shared_from_this<ElGamalAESSession>
+    {
+            struct UnconfirmedTags
+			{
+				UnconfirmedTags (int n): numTags (n), tagsCreationTime (0) { sessionTags = new SessionTag[numTags]; };
+				~UnconfirmedTags () { delete[] sessionTags; };
+				uint32_t msgID;
+				int numTags;
+				SessionTag * sessionTags;
+				uint32_t tagsCreationTime;
+			};
+
+        public:
+
+            ElGamalAESSession (GarlicDestination * owner, std::shared_ptr<const i2p::data::RoutingDestination> destination,
+				int numTags, bool attachLeaseSet);
+			ElGamalAESSession (const uint8_t * sessionKey, const SessionTag& sessionTag); // one time encryption
+			~ElGamalAESSession () {};
+
+            std::shared_ptr<I2NPMessage> WrapSingleMessage (std::shared_ptr<const I2NPMessage> msg);
+        
+            void MessageConfirmed (uint32_t msgID);
+			bool CleanupExpiredTags (); // returns true if something left
+			bool CleanupUnconfirmedTags (); // returns true if something has been deleted
+
+        private:
 
 			size_t CreateAESBlock (uint8_t * buf, std::shared_ptr<const I2NPMessage> msg);
 			size_t CreateGarlicPayload (uint8_t * payload, std::shared_ptr<const I2NPMessage> msg, UnconfirmedTags * newTags);
@@ -139,31 +178,26 @@ namespace garlic
 
 			void TagsConfirmed (uint32_t msgID);
 			UnconfirmedTags * GenerateSessionTags ();
+    
+        private:
+            
+            std::shared_ptr<const i2p::data::RoutingDestination> m_Destination;
 
-		private:
-
-			GarlicDestination * m_Owner;
-			std::shared_ptr<const i2p::data::RoutingDestination> m_Destination;
-
-			i2p::crypto::AESKey m_SessionKey;
+            i2p::crypto::AESKey m_SessionKey;
 			std::list<SessionTag> m_SessionTags;
 			int m_NumTags;
 			std::map<uint32_t, std::unique_ptr<UnconfirmedTags> > m_UnconfirmedTagsMsgs; // msgID->tags
 
-			LeaseSetUpdateStatus m_LeaseSetUpdateStatus;
-			uint32_t m_LeaseSetUpdateMsgID;
-			uint64_t m_LeaseSetSubmissionTime; // in milliseconds
+            i2p::crypto::CBCEncryption m_Encryption;
 
-			i2p::crypto::CBCEncryption m_Encryption;
-
-			std::shared_ptr<GarlicRoutingPath> m_SharedRoutingPath;
-
-		public:
+        public:
 			// for HTTP only
-			size_t GetNumOutgoingTags () const { return m_SessionTags.size (); };
-	};
-	//using GarlicRoutingSessionPtr = std::shared_ptr<GarlicRoutingSession>;
-	typedef std::shared_ptr<GarlicRoutingSession> GarlicRoutingSessionPtr; // TODO: replace to using after switch to 4.8
+			size_t GetNumOutgoingTags () const { return m_SessionTags.size (); };    
+    };
+	typedef std::shared_ptr<ElGamalAESSession> ElGamalAESSessionPtr; 
+
+    class ECIESX25519AEADRatchetSession;
+    typedef std::shared_ptr<ECIESX25519AEADRatchetSession> ECIESX25519AEADRatchetSessionPtr;     
 
 	class GarlicDestination: public i2p::data::LocalDestination
 	{
@@ -182,7 +216,8 @@ namespace garlic
 
 			void AddSessionKey (const uint8_t * key, const uint8_t * tag); // one tag
 			virtual bool SubmitSessionKey (const uint8_t * key, const uint8_t * tag); // from different thread
-			void DeliveryStatusSent (GarlicRoutingSessionPtr session, uint32_t msgID);
+			void DeliveryStatusSent (ElGamalAESSessionPtr session, uint32_t msgID);
+            void AddECIESx25519SessionTag (uint64_t tag, ECIESX25519AEADRatchetSessionPtr session);
 
 			virtual void ProcessGarlicMessage (std::shared_ptr<I2NPMessage> msg);
 			virtual void ProcessDeliveryStatusMessage (std::shared_ptr<I2NPMessage> msg);
@@ -190,12 +225,13 @@ namespace garlic
 
 			virtual std::shared_ptr<const i2p::data::LocalLeaseSet> GetLeaseSet () = 0; // TODO
 			virtual std::shared_ptr<i2p::tunnel::TunnelPool> GetTunnelPool () const = 0;
-			virtual void HandleI2NPMessage (const uint8_t * buf, size_t len, std::shared_ptr<i2p::tunnel::InboundTunnel> from) = 0;
 
 		protected:
 
+			virtual void HandleI2NPMessage (const uint8_t * buf, size_t len) = 0; // called from clove only
+			virtual bool HandleCloveI2NPMessage (I2NPMessageType typeID, const uint8_t * payload, size_t len) = 0;
 			void HandleGarlicMessage (std::shared_ptr<I2NPMessage> msg);
-			void HandleDeliveryStatusMessage (std::shared_ptr<I2NPMessage> msg);
+			void HandleDeliveryStatusMessage (uint32_t msgID);
 
 			void SaveTags ();
 			void LoadTags ();
@@ -206,18 +242,24 @@ namespace garlic
 				std::shared_ptr<i2p::tunnel::InboundTunnel> from);
 			void HandleGarlicPayload (uint8_t * buf, size_t len, std::shared_ptr<i2p::tunnel::InboundTunnel> from);
 
+			// ECIES-X25519-AEAD-Ratchet
+			void HandleECIESx25519 (const uint8_t * buf, size_t len);
+            void HandleECIESx25519GarlicClove (const uint8_t * buf, size_t len);
+
 		private:
 
 			BN_CTX * m_Ctx; // incoming
 			// outgoing sessions
 			int m_NumTags;
 			std::mutex m_SessionsMutex;
-			std::map<i2p::data::IdentHash, GarlicRoutingSessionPtr> m_Sessions;
+			std::map<i2p::data::IdentHash, ElGamalAESSessionPtr> m_Sessions;
+            std::map<i2p::data::Tag<32>, ECIESX25519AEADRatchetSessionPtr> m_ECIESx25519Sessions; // static key -> session
 			// incoming
 			std::map<SessionTag, std::shared_ptr<AESDecryption> > m_Tags;
+            std::map<uint64_t, ECIESX25519AEADRatchetSessionPtr> m_ECIESx25519Tags; // session tag -> session
 			// DeliveryStatus
 			std::mutex m_DeliveryStatusSessionsMutex;
-			std::map<uint32_t, GarlicRoutingSessionPtr> m_DeliveryStatusSessions; // msgID -> session
+			std::map<uint32_t, ElGamalAESSessionPtr> m_DeliveryStatusSessions; // msgID -> session
 
 		public:
 
